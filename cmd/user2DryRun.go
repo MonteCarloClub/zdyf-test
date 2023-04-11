@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 
 	"github.com/MonteCarloClub/log"
 	"github.com/spf13/cobra"
@@ -34,14 +35,15 @@ import (
 
 const (
 	User2DryRunUrlFormat = `http://10.176.40.46:8080/abe/dabe/user2_dry_run?filename=%v&password=%v`
-	CoConnMax            = 100
+	CountOfRetry         = 3
 )
 
 var (
-	filename string
-	password string
-	count    int
-	logStep  int
+	filename          string
+	password          string
+	count             int
+	waitQueueCapacity int64
+	logStep           int
 )
 
 // user2DryRunCmd represents the user2DryRun command
@@ -58,7 +60,11 @@ to quickly create a Cobra application.`,
 		url := fmt.Sprintf(User2DryRunUrlFormat, url.QueryEscape(filename), url.QueryEscape(password))
 		log.Info("request server...", "url", url, "count", count, "log step", logStep)
 		var wg sync.WaitGroup
+		// "1" - print end log
 		wg.Add(count + 1)
+
+		// this goroutine prints logs
+		// todo: print success rate
 		statusChan := make(chan bool, count)
 		go func() {
 			var latestLogCount int
@@ -75,25 +81,34 @@ to quickly create a Cobra application.`,
 				}
 			}
 		}()
-		batchCount := count / CoConnMax
-		for i := 0; i < batchCount+1; i++ {
-			coConnCount := CoConnMax
-			if i == batchCount {
-				coConnCount = count - CoConnMax*batchCount
-			}
-			for j := 0; j < coConnCount; j++ {
-				rank := j
-				go func(int) {
-					resp, err := http.Get(url)
-					if resp == nil || resp.StatusCode != http.StatusOK || err != nil {
-						statusChan <- false
-					} else {
-						statusChan <- true
+
+		// this goroutine tries to connect
+		var waitQueueSize int64
+		go func() {
+			for {
+				if waitQueueSize >= waitQueueCapacity {
+					continue
+				}
+				resp, _ := http.Get(url)
+				if resp != nil && resp.StatusCode == http.StatusOK {
+					statusChan <- true
+				} else {
+					atomic.AddInt64(&waitQueueSize, 1)
+					// retry infinitely
+					for j := 0; j < CountOfRetry; j++ {
+						retryResp, _ := http.Get(url)
+						if retryResp != nil && retryResp.StatusCode == http.StatusOK {
+							statusChan <- true
+							atomic.AddInt64(&waitQueueSize, -1)
+							return
+						}
 					}
-					wg.Done()
-				}(rank)
+					statusChan <- false
+					atomic.AddInt64(&waitQueueSize, -1)
+				}
+				wg.Done()
 			}
-		}
+		}()
 		wg.Wait()
 	},
 }
@@ -113,5 +128,6 @@ func init() {
 	user2DryRunCmd.Flags().StringVarP(&filename, "filename", "f", "filename", "Filename, default filename")
 	user2DryRunCmd.Flags().StringVarP(&password, "password", "p", "password", "Password, default password")
 	user2DryRunCmd.Flags().IntVarP(&count, "count", "c", 10000000, "Count of connection(s) to zdyf3, default 10000000")
+	user2DryRunCmd.Flags().Int64VarP(&waitQueueCapacity, "wait-queue-capacity", "w", 1, "Maximum of connection(s) waiting, default 1")
 	user2DryRunCmd.Flags().IntVarP(&logStep, "log-step", "l", 1, "Print log at every step, default 1 - print log at every request")
 }
