@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/MonteCarloClub/log"
 	"github.com/spf13/cobra"
@@ -62,16 +63,20 @@ to quickly create a Cobra application.`,
 		var wg sync.WaitGroup
 		// "1" - print end log
 		wg.Add(count + 1)
+		startTs := time.Now().UnixNano()
 
 		// this goroutine prints logs
-		// todo: print success rate
+		var retryCount int64
 		statusChan := make(chan bool, count)
 		go func() {
 			var latestLogCount int
 			for {
 				reqCount := len(statusChan)
-				if reqCount == count {
-					log.Info("all request(s) finished")
+				if reqCount >= count {
+					endTs := time.Now().UnixNano()
+					timeInS := (endTs - startTs) / 1e9
+					log.Info("all request(s) finished", "count of request(s)", reqCount, "time/s", timeInS)
+					log.Info("test results", "retry count", retryCount)
 					wg.Done()
 					return
 				}
@@ -96,6 +101,7 @@ to quickly create a Cobra application.`,
 					atomic.AddInt64(&waitQueueSize, 1)
 					// retry infinitely
 					for j := 0; j < CountOfRetry; j++ {
+						atomic.AddInt64(&retryCount, 1)
 						retryResp, _ := http.Get(url)
 						if retryResp != nil && retryResp.StatusCode == http.StatusOK {
 							statusChan <- true
